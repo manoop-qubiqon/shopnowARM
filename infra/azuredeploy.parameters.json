@@ -32,6 +32,9 @@
     "appRepoBranch": {
       "value": "main"
     },
+    "keyVaultAuthMode": {
+      "value": "AccessPolicy"
+    },
     "adminObjectId": {
       "value": ""
     }

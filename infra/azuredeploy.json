@@ -46,14 +46,22 @@
     },
     "vmSize": {
       "type": "string",
-      "defaultValue": "Standard_B1s",
+      "defaultValue": "Standard_B2ats_v2",
       "allowedValues": [
         "Standard_B1s",
         "Standard_B1ms",
-        "Standard_B2s"
+        "Standard_B2s",
+        "Standard_B2ats_v2",
+        "Standard_B2als_v2",
+        "Standard_B2s_v2",
+        "Standard_B2ls_v2",
+        "Standard_D2as_v5",
+        "Standard_D2s_v5",
+        "Standard_D2as_v6",
+        "Standard_D2s_v6"
       ],
       "metadata": {
-        "description": "Standard_B1s is covered by the 12-month free services (750 h/month)."
+        "description": "Standard_B1s and Standard_B2ats_v2 are covered by the 12-month free services (750 h/month each). If B1s fails with SkuNotAvailable, use Standard_B2ats_v2 (2 vCPU, 1 GB)."
       }
     },
     "osDiskType": {
@@ -109,11 +117,22 @@
         "description": "Branch to deploy."
       }
     },
+    "keyVaultAuthMode": {
+      "type": "string",
+      "defaultValue": "AccessPolicy",
+      "allowedValues": [
+        "AccessPolicy",
+        "RBAC"
+      ],
+      "metadata": {
+        "description": "AccessPolicy works with the Contributor role. RBAC needs Owner / User Access Administrator / RBAC Administrator, because it creates role assignments."
+      }
+    },
     "adminObjectId": {
       "type": "string",
       "defaultValue": "",
       "metadata": {
-        "description": "Optional: your Entra ID object id (az ad signed-in-user show --query id -o tsv). Grants you 'Key Vault Secrets Officer' so you can see the secret in the portal."
+        "description": "Optional: your Entra ID object id (az ad signed-in-user show --query id -o tsv). Gives you get/list/set on secrets so you can see the secret in the portal."
       }
     }
   },
@@ -131,6 +150,8 @@
     "dbName": "shopdb",
     "kvName": "[take(toLower(format('kv-{0}-{1}', parameters('prefix'), variables('suffix'))), 24)]",
     "secretName": "sql-admin-password",
+    "useRbac": "[equals(parameters('keyVaultAuthMode'), 'RBAC')]",
+    "adminAccessPolicies": "[if(empty(parameters('adminObjectId')), createArray(), createArray(createObject('tenantId', subscription().tenantId, 'objectId', parameters('adminObjectId'), 'permissions', createObject('secrets', createArray('get', 'list', 'set', 'delete', 'recover', 'purge')))))]",
     "appPort": 3000,
     "sshNatBasePort": 50001,
     "subnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('subnetName'))]",
@@ -428,7 +449,8 @@
           "family": "A",
           "name": "standard"
         },
-        "enableRbacAuthorization": true,
+        "enableRbacAuthorization": "[variables('useRbac')]",
+        "accessPolicies": "[if(variables('useRbac'), createArray(), variables('adminAccessPolicies'))]",
         "enableSoftDelete": true,
         "softDeleteRetentionInDays": 7,
         "publicNetworkAccess": "Enabled",
@@ -451,7 +473,7 @@
       }
     },
     {
-      "condition": "[not(empty(parameters('adminObjectId')))]",
+      "condition": "[and(variables('useRbac'), not(empty(parameters('adminObjectId'))))]",
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
       "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), parameters('adminObjectId'), 'kv-secrets-officer')]",
@@ -537,6 +559,7 @@
       }
     },
     {
+      "condition": "[variables('useRbac')]",
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
       "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), resourceId('Microsoft.Compute/virtualMachines', format('{0}-{1}', variables('vmPrefix'), copyIndex(1))), 'kv-secrets-user')]",
@@ -553,6 +576,33 @@
         "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
         "principalId": "[reference(resourceId('Microsoft.Compute/virtualMachines', format('{0}-{1}', variables('vmPrefix'), copyIndex(1))), '2024-07-01', 'full').identity.principalId]",
         "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "condition": "[not(variables('useRbac'))]",
+      "type": "Microsoft.KeyVault/vaults/accessPolicies",
+      "apiVersion": "2023-07-01",
+      "name": "[format('{0}/add', variables('kvName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]",
+        "vmLoop"
+      ],
+      "properties": {
+        "copy": [
+          {
+            "name": "accessPolicies",
+            "count": "[parameters('vmCount')]",
+            "input": {
+              "tenantId": "[subscription().tenantId]",
+              "objectId": "[reference(resourceId('Microsoft.Compute/virtualMachines', format('{0}-{1}', variables('vmPrefix'), copyIndex('accessPolicies', 1))), '2024-07-01', 'full').identity.principalId]",
+              "permissions": {
+                "secrets": [
+                  "get"
+                ]
+              }
+            }
+          }
+        ]
       }
     }
   ],
@@ -594,6 +644,10 @@
     "sqlFreeOffer": {
       "type": "bool",
       "value": "[parameters('useSqlFreeOffer')]"
+    },
+    "keyVaultAuthMode": {
+      "type": "string",
+      "value": "[parameters('keyVaultAuthMode')]"
     }
   }
 }

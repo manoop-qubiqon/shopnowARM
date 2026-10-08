@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShopNow</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #1d232b; --muted: #66707c; --line: #e3e6ea;
+    --brand: #0f6cbd; --brand-ink: #ffffff; --ok: #107c41; --warn: #b4580b; --err: #c4314b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+  header { background: #12263f; color: #fff; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 22px; letter-spacing: .3px; }
+  header h1 span { color: #7cc4ff; }
+  .cart-btn { background: var(--brand); color: var(--brand-ink); border: 0; border-radius: 8px; padding: 9px 14px; font-size: 15px; cursor: pointer; }
+  .infra { background: #e8f1fb; border-bottom: 1px solid #c9ddf2; padding: 8px 20px; font-size: 13px; display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+  .infra b { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.ok { background: #dff3e6; color: var(--ok); } .pill.warn { background: #fdecdc; color: var(--warn); }
+  .infra button { background: transparent; border: 1px solid #9cc3e8; border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; }
+  main { max-width: 1150px; margin: 0 auto; padding: 20px; display: grid; grid-template-columns: 1fr 330px; gap: 20px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+  .card .img { font-size: 44px; text-align: center; background: #f1f4f8; border-radius: 8px; padding: 14px 0; }
+  .card .cat { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+  .card .name { font-weight: 600; font-size: 14px; min-height: 36px; }
+  .card .row { display: flex; justify-content: space-between; align-items: center; margin-top: auto; }
+  .price { font-weight: 700; font-size: 16px; }
+  .stock { font-size: 12px; color: var(--muted); }
+  .add { background: var(--brand); color: #fff; border: 0; border-radius: 6px; padding: 7px 10px; cursor: pointer; font-size: 13px; }
+  .add:disabled { background: #b8c2cc; cursor: not-allowed; }
+  aside { display: flex; flex-direction: column; gap: 20px; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .line { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 14px; }
+  .line:last-child { border-bottom: 0; }
+  .qty button { width: 24px; height: 24px; border: 1px solid var(--line); background: #fff; border-radius: 5px; cursor: pointer; }
+  .total { display: flex; justify-content: space-between; font-weight: 700; margin: 10px 0; font-size: 16px; }
+  input { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; margin-bottom: 8px; }
+  .checkout { width: 100%; background: var(--ok); color: #fff; border: 0; border-radius: 8px; padding: 10px; font-size: 15px; cursor: pointer; }
+  .checkout:disabled { background: #b8c2cc; cursor: not-allowed; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .msg { margin-top: 10px; font-size: 13px; padding: 8px 10px; border-radius: 6px; display: none; }
+  .msg.ok { display: block; background: #dff3e6; color: var(--ok); } .msg.err { display: block; background: #fbe3e7; color: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛒 Shop<span>Now</span></h1>
+  <button class="cart-btn" onclick="document.getElementById('cart').scrollIntoView({behavior:'smooth'})">Cart (<span id="cartCount">0</span>)</button>
+</header>
+
+<div class="infra">
+  <span>Served by VM: <b id="vm">…</b></span>
+  <span>Database: <span id="dbStatus" class="pill warn">…</span></span>
+  <button onclick="loadInfo()" title="Each click is a new request through the Load Balancer">↻ Hit the Load Balancer again</button>
+</div>
+
+<main>
+  <section>
+    <h2>Products</h2>
+    <div id="products" class="grid"><p class="muted">Loading products…</p></div>
+  </section>
+
+  <aside>
+    <div class="panel" id="cart">
+      <h2>Your cart</h2>
+      <div id="cartLines"><p class="muted">Cart is empty.</p></div>
+      <div class="total"><span>Total</span><span id="cartTotal">₹0</span></div>
+      <input id="customer" placeholder="Your name" autocomplete="name">
+      <input id="email" placeholder="Email" type="email" autocomplete="email">
+      <button class="checkout" id="checkoutBtn" onclick="checkout()" disabled>Place order</button>
+      <div id="msg" class="msg"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Recent orders</h2>
+      <p class="muted" style="margin-top:-6px">Stored in Azure SQL — note which VM handled each one.</p>
+      <div id="orders"><p class="muted">No orders yet.</p></div>
+    </div>
+  </aside>
+</main>
+
+<footer>ShopNow · ARM template 3-tier lab · Load Balancer → VMs → Azure SQL · secrets from Key Vault</footer>
+
+<script>
+  const inr = n => '₹' + Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  let products = [];
+  const cart = new Map(); // productId -> qty
+
+  async function loadInfo() {
+    try {
+      const r = await fetch('/api/info', { cache: 'no-store' });
+      const i = await r.json();
+      document.getElementById('vm').textContent = i.vm;
+      const pill = document.getElementById('dbStatus');
+      pill.textContent = i.db;
+      pill.className = 'pill ' + (i.db.startsWith('connected') ? 'ok' : 'warn');
+      pill.title = i.lastError || '';
+    } catch { document.getElementById('vm').textContent = 'unreachable'; }
+  }
+
+  async function loadProducts() {
+    const el = document.getElementById('products');
+    const r = await fetch('/api/products', { cache: 'no-store' });
+    if (!r.ok) {
+      el.innerHTML = '<p class="muted">Database is still starting up (the serverless DB can take ~1 minute to wake). Retrying…</p>';
+      setTimeout(loadProducts, 8000);
+      return;
+    }
+    products = await r.json();
+    el.innerHTML = products.map(p => `
+      <div class="card">
+        <div class="img">${esc(p.emoji || '📦')}</div>
+        <div class="cat">${esc(p.category)}</div>
+        <div class="name">${esc(p.name)}</div>
+        <div class="row"><span class="price">${inr(p.price)}</span><span class="stock">${p.stock} in stock</span></div>
+        <button class="add" ${p.stock < 1 ? 'disabled' : ''} onclick="addToCart(${p.id})">${p.stock < 1 ? 'Sold out' : 'Add to cart'}</button>
+      </div>`).join('');
+  }
+
+  async function loadOrders() {
+    const r = await fetch('/api/orders/recent', { cache: 'no-store' });
+    if (!r.ok) return;
+    const orders = await r.json();
+    document.getElementById('orders').innerHTML = orders.length === 0 ? '<p class="muted">No orders yet.</p>' :
+      `<table><tr><th>#</th><th>Customer</th><th>Total</th><th>VM</th></tr>` +
+      orders.map(o => `<tr><td>${o.id}</td><td>${esc(o.customer)}</td><td>${inr(o.total)}</td><td><code>${esc(o.servedBy)}</code></td></tr>`).join('') +
+      `</table>`;
+  }
+
+  function addToCart(id) {
+    const p = products.find(x => x.id === id);
+    const q = (cart.get(id) || 0) + 1;
+    if (q > p.stock) return;
+    cart.set(id, q);
+    renderCart();
+  }
+  function changeQty(id, d) {
+    const q = (cart.get(id) || 0) + d;
+    if (q <= 0) cart.delete(id); else cart.set(id, q);
+    renderCart();
+  }
+  function renderCart() {
+    let total = 0, count = 0;
+    const lines = [...cart.entries()].map(([id, q]) => {
+      const p = products.find(x => x.id === id);
+      total += p.price * q; count += q;
+      return `<div class="line"><span>${esc(p.emoji || '')} ${esc(p.name)}</span>
+        <span class="qty"><button onclick="changeQty(${id},-1)">−</button> ${q} <button onclick="changeQty(${id},1)">+</button></span></div>`;
+    });
+    document.getElementById('cartLines').innerHTML = lines.length ? lines.join('') : '<p class="muted">Cart is empty.</p>';
+    document.getElementById('cartTotal').textContent = inr(total);
+    document.getElementById('cartCount').textContent = count;
+    document.getElementById('checkoutBtn').disabled = count === 0;
+  }
+
+  async function checkout() {
+    const msg = document.getElementById('msg');
+    const customer = document.getElementById('customer').value.trim();
+    const email = document.getElementById('email').value.trim();
+    if (!customer || !email) { msg.className = 'msg err'; msg.textContent = 'Please enter your name and email.'; return; }
+    const btn = document.getElementById('checkoutBtn');
+    btn.disabled = true;
+    try {
+      const r = await fetch('/api/orders', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer, email, items: [...cart.entries()].map(([productId, quantity]) => ({ productId, quantity })) })
+      });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || 'Order failed');
+      msg.className = 'msg ok';
+      msg.textContent = `Order #${body.id} placed — ${inr(body.total)}. Handled by ${body.servedBy}.`;
+      cart.clear(); renderCart();
+      await Promise.all([loadProducts(), loadOrders(), loadInfo()]);
+    } catch (e) {
+      msg.className = 'msg err'; msg.textContent = e.message;
+      btn.disabled = false;
+    }
+  }
+
+  loadInfo(); loadProducts(); loadOrders();
+</script>
+</body>
+</html>

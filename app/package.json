@@ -1,0 +1,17 @@
+{
+  "name": "shopnow",
+  "version": "1.0.0",
+  "description": "ShopNow - a tiny 3-tier e-commerce demo app for the ARM template lab (Azure VMs + Load Balancer + Azure SQL + Key Vault)",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "mssql": "^11.0.1"
+  }
+}

@@ -1,0 +1,599 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "ShopNow 3-tier e-commerce lab: VNet + NSG, Standard Load Balancer (HTTP + SSH NAT + outbound), N Linux web VMs, Azure SQL (serverless free offer), Key Vault secret read via managed identity. Free-tier friendly defaults.",
+    "author": "Akumenbyq DevOps training"
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Region for all resources. Defaults to the resource group's region."
+      }
+    },
+    "prefix": {
+      "type": "string",
+      "defaultValue": "shopnow",
+      "minLength": 3,
+      "maxLength": 10,
+      "metadata": {
+        "description": "Short lowercase name used in every resource name."
+      }
+    },
+    "adminUsername": {
+      "type": "string",
+      "defaultValue": "azureuser",
+      "metadata": {
+        "description": "Linux admin user on the web VMs."
+      }
+    },
+    "sshPublicKey": {
+      "type": "string",
+      "metadata": {
+        "description": "Contents of your SSH public key (~/.ssh/id_rsa.pub or id_ed25519.pub)."
+      }
+    },
+    "vmCount": {
+      "type": "int",
+      "defaultValue": 2,
+      "minValue": 1,
+      "maxValue": 3,
+      "metadata": {
+        "description": "Number of web VMs behind the Load Balancer. Free trial vCPU quota is small, keep 2."
+      }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_B1s",
+      "allowedValues": [
+        "Standard_B1s",
+        "Standard_B1ms",
+        "Standard_B2s"
+      ],
+      "metadata": {
+        "description": "Standard_B1s is covered by the 12-month free services (750 h/month)."
+      }
+    },
+    "osDiskType": {
+      "type": "string",
+      "defaultValue": "Premium_LRS",
+      "allowedValues": [
+        "Premium_LRS",
+        "StandardSSD_LRS",
+        "Standard_LRS"
+      ],
+      "metadata": {
+        "description": "Premium_LRS at 64 GB = P6, which matches the free-account managed disk offer."
+      }
+    },
+    "allowedSshSource": {
+      "type": "string",
+      "defaultValue": "*",
+      "metadata": {
+        "description": "Source IP/CIDR allowed to SSH (via LB NAT ports 50001+). Use your public IP, e.g. 203.0.113.10/32."
+      }
+    },
+    "sqlAdminLogin": {
+      "type": "string",
+      "defaultValue": "shopadmin",
+      "metadata": {
+        "description": "SQL server admin login."
+      }
+    },
+    "sqlAdminPassword": {
+      "type": "securestring",
+      "minLength": 12,
+      "metadata": {
+        "description": "SQL admin password. Stored in Key Vault; the app reads it from there."
+      }
+    },
+    "useSqlFreeOffer": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "true = serverless DB on the Azure SQL free offer (auto-pauses when the monthly free limit is used). false = Basic tier (about Rs 400/month) if your subscription has no free DBs left."
+      }
+    },
+    "appRepoUrl": {
+      "type": "string",
+      "metadata": {
+        "description": "PUBLIC git repo that contains the app/ folder, e.g. https://github.com/<you>/shopnow-arm-lab.git"
+      }
+    },
+    "appRepoBranch": {
+      "type": "string",
+      "defaultValue": "main",
+      "metadata": {
+        "description": "Branch to deploy."
+      }
+    },
+    "adminObjectId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional: your Entra ID object id (az ad signed-in-user show --query id -o tsv). Grants you 'Key Vault Secrets Officer' so you can see the secret in the portal."
+      }
+    }
+  },
+  "variables": {
+    "suffix": "[uniqueString(resourceGroup().id)]",
+    "vnetName": "[format('vnet-{0}', parameters('prefix'))]",
+    "subnetName": "snet-web",
+    "nsgName": "[format('nsg-{0}-web', parameters('prefix'))]",
+    "pipName": "[format('pip-{0}-lb', parameters('prefix'))]",
+    "lbName": "[format('lb-{0}', parameters('prefix'))]",
+    "dnsLabel": "[toLower(format('{0}-{1}', parameters('prefix'), take(variables('suffix'), 6)))]",
+    "vmPrefix": "[format('vm-{0}-web', parameters('prefix'))]",
+    "sqlServerName": "[toLower(format('sql-{0}-{1}', parameters('prefix'), variables('suffix')))]",
+    "sqlFqdn": "[format('{0}{1}', variables('sqlServerName'), environment().suffixes.sqlServerHostname)]",
+    "dbName": "shopdb",
+    "kvName": "[take(toLower(format('kv-{0}-{1}', parameters('prefix'), variables('suffix'))), 24)]",
+    "secretName": "sql-admin-password",
+    "appPort": 3000,
+    "sshNatBasePort": 50001,
+    "subnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('subnetName'))]",
+    "dbSku": "[if(parameters('useSqlFreeOffer'), createObject('name', 'GP_S_Gen5', 'tier', 'GeneralPurpose', 'family', 'Gen5', 'capacity', 2), createObject('name', 'Basic', 'tier', 'Basic', 'capacity', 5))]",
+    "dbPropsFree": {
+      "useFreeLimit": true,
+      "freeLimitExhaustionBehavior": "AutoPause",
+      "autoPauseDelay": 60,
+      "minCapacity": 0.5,
+      "maxSizeBytes": 34359738368,
+      "requestedBackupStorageRedundancy": "Local",
+      "collation": "SQL_Latin1_General_CP1_CI_AS"
+    },
+    "dbPropsBasic": {
+      "maxSizeBytes": 2147483648,
+      "requestedBackupStorageRedundancy": "Local",
+      "collation": "SQL_Latin1_General_CP1_CI_AS"
+    },
+    "cloudInit": "#cloud-config\npackage_update: true\npackages:\n  - git\n  - curl\nwrite_files:\n  - path: /etc/shopnow.env\n    permissions: '0644'\n    content: |\n      PORT=3000\n      SQL_SERVER={2}\n      SQL_DATABASE={3}\n      SQL_USER={4}\n      KEYVAULT_NAME={5}\n      SECRET_NAME={6}\n  - path: /etc/systemd/system/shopnow.service\n    permissions: '0644'\n    content: |\n      [Unit]\n      Description=ShopNow e-commerce web tier\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      EnvironmentFile=/etc/shopnow.env\n      WorkingDirectory=/opt/shopnow/app\n      ExecStart=/usr/bin/node server.js\n      Restart=always\n      RestartSec=5\n      DynamicUser=yes\n\n      [Install]\n      WantedBy=multi-user.target\nruncmd:\n  - [ bash, -c, \"curl -fsSL https://deb.nodesource.com/setup_22.x | bash -\" ]\n  - [ apt-get, install, -y, nodejs ]\n  - [ git, clone, --depth, \"1\", --branch, \"{1}\", \"{0}\", /opt/shopnow ]\n  - [ bash, -c, \"export HOME=/root && cd /opt/shopnow/app && npm install --omit=dev --no-audit --no-fund\" ]\n  - [ systemctl, daemon-reload ]\n  - [ systemctl, enable, --now, shopnow ]\n"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('nsgName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "Allow-App-HTTP-Inbound",
+            "properties": {
+              "description": "LB rule 80 -> 3000. Standard LB keeps the client IP, so allow Internet on the backend port.",
+              "priority": 100,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "Internet",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "[string(variables('appPort'))]"
+            }
+          },
+          {
+            "name": "Allow-SSH-Inbound",
+            "properties": {
+              "description": "SSH reaches the VMs through LB inbound NAT rules (50001 -> vm1:22, 50002 -> vm2:22).",
+              "priority": 110,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "[parameters('allowedSshSource')]",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "22"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('vnetName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+      ],
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "10.10.0.0/16"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "[variables('subnetName')]",
+            "properties": {
+              "addressPrefix": "10.10.1.0/24",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+              },
+              "serviceEndpoints": [
+                {
+                  "service": "Microsoft.Sql"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('pipName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard",
+        "tier": "Regional"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "publicIPAddressVersion": "IPv4",
+        "dnsSettings": {
+          "domainNameLabel": "[variables('dnsLabel')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Network/loadBalancers",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('lbName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard",
+        "tier": "Regional"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('pipName'))]"
+      ],
+      "properties": {
+        "frontendIPConfigurations": [
+          {
+            "name": "fe-public",
+            "properties": {
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('pipName'))]"
+              }
+            }
+          }
+        ],
+        "backendAddressPools": [
+          {
+            "name": "be-web"
+          }
+        ],
+        "probes": [
+          {
+            "name": "probe-http",
+            "properties": {
+              "protocol": "Http",
+              "port": "[variables('appPort')]",
+              "requestPath": "/health",
+              "intervalInSeconds": 5,
+              "numberOfProbes": 2,
+              "probeThreshold": 2
+            }
+          }
+        ],
+        "loadBalancingRules": [
+          {
+            "name": "rule-http-80",
+            "properties": {
+              "frontendIPConfiguration": {
+                "id": "[resourceId('Microsoft.Network/loadBalancers/frontendIPConfigurations', variables('lbName'), 'fe-public')]"
+              },
+              "backendAddressPool": {
+                "id": "[resourceId('Microsoft.Network/loadBalancers/backendAddressPools', variables('lbName'), 'be-web')]"
+              },
+              "probe": {
+                "id": "[resourceId('Microsoft.Network/loadBalancers/probes', variables('lbName'), 'probe-http')]"
+              },
+              "protocol": "Tcp",
+              "frontendPort": 80,
+              "backendPort": "[variables('appPort')]",
+              "idleTimeoutInMinutes": 4,
+              "enableFloatingIP": false,
+              "loadDistribution": "Default",
+              "disableOutboundSnat": true
+            }
+          }
+        ],
+        "outboundRules": [
+          {
+            "name": "outbound-internet",
+            "properties": {
+              "frontendIPConfigurations": [
+                {
+                  "id": "[resourceId('Microsoft.Network/loadBalancers/frontendIPConfigurations', variables('lbName'), 'fe-public')]"
+                }
+              ],
+              "backendAddressPool": {
+                "id": "[resourceId('Microsoft.Network/loadBalancers/backendAddressPools', variables('lbName'), 'be-web')]"
+              },
+              "protocol": "All",
+              "allocatedOutboundPorts": 10000,
+              "idleTimeoutInMinutes": 4,
+              "enableTcpReset": true
+            }
+          }
+        ],
+        "copy": [
+          {
+            "name": "inboundNatRules",
+            "count": "[parameters('vmCount')]",
+            "input": {
+              "name": "[format('nat-ssh-vm{0}', copyIndex('inboundNatRules', 1))]",
+              "properties": {
+                "frontendIPConfiguration": {
+                  "id": "[resourceId('Microsoft.Network/loadBalancers/frontendIPConfigurations', variables('lbName'), 'fe-public')]"
+                },
+                "protocol": "Tcp",
+                "frontendPort": "[add(variables('sshNatBasePort'), copyIndex('inboundNatRules'))]",
+                "backendPort": 22,
+                "enableFloatingIP": false,
+                "idleTimeoutInMinutes": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2024-05-01",
+      "name": "[format('nic-{0}-{1}', variables('vmPrefix'), copyIndex(1))]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "nicLoop",
+        "count": "[parameters('vmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+        "[resourceId('Microsoft.Network/loadBalancers', variables('lbName'))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "subnet": {
+                "id": "[variables('subnetId')]"
+              },
+              "loadBalancerBackendAddressPools": [
+                {
+                  "id": "[resourceId('Microsoft.Network/loadBalancers/backendAddressPools', variables('lbName'), 'be-web')]"
+                }
+              ],
+              "loadBalancerInboundNatRules": [
+                {
+                  "id": "[resourceId('Microsoft.Network/loadBalancers/inboundNatRules', variables('lbName'), format('nat-ssh-vm{0}', copyIndex(1)))]"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Sql/servers",
+      "apiVersion": "2023-08-01-preview",
+      "name": "[variables('sqlServerName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "administratorLogin": "[parameters('sqlAdminLogin')]",
+        "administratorLoginPassword": "[parameters('sqlAdminPassword')]",
+        "version": "12.0",
+        "minimalTlsVersion": "1.2",
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.Sql/servers/virtualNetworkRules",
+      "apiVersion": "2023-08-01-preview",
+      "name": "[format('{0}/allow-web-subnet', variables('sqlServerName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', variables('sqlServerName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ],
+      "properties": {
+        "virtualNetworkSubnetId": "[variables('subnetId')]",
+        "ignoreMissingVnetServiceEndpoint": false
+      }
+    },
+    {
+      "type": "Microsoft.Sql/servers/databases",
+      "apiVersion": "2023-08-01-preview",
+      "name": "[format('{0}/{1}', variables('sqlServerName'), variables('dbName'))]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', variables('sqlServerName'))]"
+      ],
+      "sku": "[variables('dbSku')]",
+      "properties": "[if(parameters('useSqlFreeOffer'), variables('dbPropsFree'), variables('dbPropsBasic'))]"
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2023-07-01",
+      "name": "[variables('kvName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "tenantId": "[subscription().tenantId]",
+        "sku": {
+          "family": "A",
+          "name": "standard"
+        },
+        "enableRbacAuthorization": true,
+        "enableSoftDelete": true,
+        "softDeleteRetentionInDays": 7,
+        "publicNetworkAccess": "Enabled",
+        "networkAcls": {
+          "defaultAction": "Allow",
+          "bypass": "AzureServices"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults/secrets",
+      "apiVersion": "2023-07-01",
+      "name": "[format('{0}/{1}', variables('kvName'), variables('secretName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]"
+      ],
+      "properties": {
+        "value": "[parameters('sqlAdminPassword')]",
+        "contentType": "SQL admin password for ShopNow"
+      }
+    },
+    {
+      "condition": "[not(empty(parameters('adminObjectId')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), parameters('adminObjectId'), 'kv-secrets-officer')]",
+      "scope": "[format('Microsoft.KeyVault/vaults/{0}', variables('kvName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')]",
+        "principalId": "[parameters('adminObjectId')]"
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2024-07-01",
+      "name": "[format('{0}-{1}', variables('vmPrefix'), copyIndex(1))]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "vmLoop",
+        "count": "[parameters('vmCount')]"
+      },
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', format('nic-{0}-{1}', variables('vmPrefix'), copyIndex(1)))]",
+        "[resourceId('Microsoft.Sql/servers/databases', variables('sqlServerName'), variables('dbName'))]",
+        "[resourceId('Microsoft.Sql/servers/virtualNetworkRules', variables('sqlServerName'), 'allow-web-subnet')]",
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('kvName'), variables('secretName'))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "osProfile": {
+          "computerName": "[format('{0}-{1}', variables('vmPrefix'), copyIndex(1))]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "customData": "[base64(format(variables('cloudInit'), parameters('appRepoUrl'), parameters('appRepoBranch'), variables('sqlFqdn'), variables('dbName'), parameters('sqlAdminLogin'), variables('kvName'), variables('secretName')))]",
+          "linuxConfiguration": {
+            "disablePasswordAuthentication": true,
+            "ssh": {
+              "publicKeys": [
+                {
+                  "path": "[format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername'))]",
+                  "keyData": "[parameters('sshPublicKey')]"
+                }
+              ]
+            }
+          }
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "ubuntu-24_04-lts",
+            "sku": "server",
+            "version": "latest"
+          },
+          "osDisk": {
+            "name": "[format('osdisk-{0}', format('{0}-{1}', variables('vmPrefix'), copyIndex(1)))]",
+            "createOption": "FromImage",
+            "diskSizeGB": 64,
+            "deleteOption": "Delete",
+            "managedDisk": {
+              "storageAccountType": "[parameters('osDiskType')]"
+            }
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', format('nic-{0}-{1}', variables('vmPrefix'), copyIndex(1)))]",
+              "properties": {
+                "deleteOption": "Delete"
+              }
+            }
+          ]
+        },
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), resourceId('Microsoft.Compute/virtualMachines', format('{0}-{1}', variables('vmPrefix'), copyIndex(1))), 'kv-secrets-user')]",
+      "scope": "[format('Microsoft.KeyVault/vaults/{0}', variables('kvName'))]",
+      "copy": {
+        "name": "kvRoleLoop",
+        "count": "[parameters('vmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]",
+        "[resourceId('Microsoft.Compute/virtualMachines', format('{0}-{1}', variables('vmPrefix'), copyIndex(1)))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
+        "principalId": "[reference(resourceId('Microsoft.Compute/virtualMachines', format('{0}-{1}', variables('vmPrefix'), copyIndex(1))), '2024-07-01', 'full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    }
+  ],
+  "outputs": {
+    "appUrl": {
+      "type": "string",
+      "value": "[format('http://{0}', reference(resourceId('Microsoft.Network/publicIPAddresses', variables('pipName')), '2024-05-01').dnsSettings.fqdn)]"
+    },
+    "publicIpAddress": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('pipName')), '2024-05-01').ipAddress]"
+    },
+    "sshCommands": {
+      "type": "array",
+      "copy": {
+        "count": "[parameters('vmCount')]",
+        "input": "[format('ssh -p {0} {1}@{2}', add(variables('sshNatBasePort'), copyIndex()), parameters('adminUsername'), reference(resourceId('Microsoft.Network/publicIPAddresses', variables('pipName')), '2024-05-01').dnsSettings.fqdn)]"
+      }
+    },
+    "vmNames": {
+      "type": "array",
+      "copy": {
+        "count": "[parameters('vmCount')]",
+        "input": "[format('{0}-{1}', variables('vmPrefix'), copyIndex(1))]"
+      }
+    },
+    "sqlServerFqdn": {
+      "type": "string",
+      "value": "[variables('sqlFqdn')]"
+    },
+    "sqlDatabaseName": {
+      "type": "string",
+      "value": "[variables('dbName')]"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "value": "[variables('kvName')]"
+    },
+    "sqlFreeOffer": {
+      "type": "bool",
+      "value": "[parameters('useSqlFreeOffer')]"
+    }
+  }
+}

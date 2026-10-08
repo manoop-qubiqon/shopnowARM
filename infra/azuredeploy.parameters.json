@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "prefix": {
+      "value": "shopnow"
+    },
+    "adminUsername": {
+      "value": "azureuser"
+    },
+    "sshPublicKey": {
+      "value": "ssh-ed25519 AAAA...PASTE-YOUR-PUBLIC-KEY-HERE... you@laptop"
+    },
+    "vmCount": {
+      "value": 2
+    },
+    "vmSize": {
+      "value": "Standard_B1s"
+    },
+    "allowedSshSource": {
+      "value": "*"
+    },
+    "sqlAdminLogin": {
+      "value": "shopadmin"
+    },
+    "useSqlFreeOffer": {
+      "value": true
+    },
+    "appRepoUrl": {
+      "value": "https://github.com/<your-github-user>/shopnow-arm-lab.git"
+    },
+    "appRepoBranch": {
+      "value": "main"
+    },
+    "adminObjectId": {
+      "value": ""
+    }
+  }
+}
